@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -27,34 +28,6 @@ const (
 	CardOperationModify CardOperation = "modify"
 )
 
-// RefCommand is a command to be send to the teams
-type RefCommand string
-
-const (
-	// CommandHalt HALT
-	CommandHalt RefCommand = "halt"
-	// CommandStop STOP
-	CommandStop RefCommand = "stop"
-	// CommandNormalStart NORMAL_START
-	CommandNormalStart RefCommand = "normalStart"
-	// CommandForceStart FORCE_START
-	CommandForceStart RefCommand = "forceStart"
-	// CommandDirect DIRECT
-	CommandDirect RefCommand = "direct"
-	// CommandIndirect INDIRECT
-	CommandIndirect RefCommand = "indirect"
-	// CommandKickoff KICKOFF
-	CommandKickoff RefCommand = "kickoff"
-	// CommandPenalty PENALTY
-	CommandPenalty RefCommand = "penalty"
-	// CommandTimeout TIMEOUT
-	CommandTimeout RefCommand = "timeout"
-	// CommandBallPlacement BALL_PLACEMENT
-	CommandBallPlacement RefCommand = "ballPlacement"
-	// CommandGoal GOAL
-	CommandGoal RefCommand = "goal"
-)
-
 // StageOperation to apply on the current stage
 type StageOperation string
 
@@ -63,6 +36,8 @@ const (
 	StageNext StageOperation = "next"
 	// StagePrevious previous stage
 	StagePrevious StageOperation = "previous"
+	// StageEndGame ends the game
+	StageEndGame StageOperation = "endGame"
 )
 
 // TriggerType is something that can be triggered
@@ -77,6 +52,8 @@ const (
 	TriggerSwitchSides TriggerType = "switchSides"
 	// TriggerUndo undo last action
 	TriggerUndo TriggerType = "undo"
+	// TriggerContinue continues based on the current game event
+	TriggerContinue TriggerType = "continue"
 )
 
 // CardModification to apply to a card
@@ -112,51 +89,37 @@ type EventModifyCardTime struct {
 	Duration string `json:"duration"`
 }
 
+// EventModifyGameEventBehavior holds the type to behavior mapping
+type EventModifyGameEventBehavior struct {
+	GameEventType     GameEventType     `json:"gameEventType"`
+	GameEventBehavior GameEventBehavior `json:"gameEventBehavior"`
+}
+
 // EventModifyValue is an event that can be applied
 type EventModifyValue struct {
-	ForTeam Team `json:"forTeam"`
+	ForTeam Team `json:"forTeam,omitempty"`
 
-	Goals           *int                 `json:"goals"`
-	Goalie          *int                 `json:"goalie"`
-	YellowCards     *int                 `json:"yellowCards"`
-	YellowCardTime  *EventModifyCardTime `json:"yellowCardTime"`
-	RedCards        *int                 `json:"redCards"`
-	TimeoutsLeft    *int                 `json:"timeoutsLeft"`
-	TimeoutTimeLeft *string              `json:"timeoutTimeLeft"`
-	OnPositiveHalf  *bool                `json:"onPositiveHalf"`
-	TeamName        *string              `json:"teamName"`
+	Goals                 *int                          `json:"goals,omitempty"`
+	Goalie                *int                          `json:"goalie,omitempty"`
+	YellowCards           *int                          `json:"yellowCards,omitempty"`
+	YellowCardTime        *EventModifyCardTime          `json:"yellowCardTime,omitempty"`
+	RedCards              *int                          `json:"redCards,omitempty"`
+	TimeoutsLeft          *int                          `json:"timeoutsLeft,omitempty"`
+	TimeoutTimeLeft       *string                       `json:"timeoutTimeLeft,omitempty"`
+	OnPositiveHalf        *bool                         `json:"onPositiveHalf,omitempty"`
+	TeamName              *string                       `json:"teamName,omitempty"`
+	FoulCounter           *int                          `json:"foulCounter,omitempty"`
+	BallPlacementFailures *int                          `json:"ballPlacementFailures,omitempty"`
+	CanPlaceBall          *bool                         `json:"canPlaceBall,omitempty"`
+	Division              *Division                     `json:"division,omitempty"`
+	AutoContinue          *bool                         `json:"autoContinue,omitempty"`
+	GameEventBehavior     *EventModifyGameEventBehavior `json:"gameEventBehavior,omitempty"`
+	BotSubstitutionIntend *bool                         `json:"botSubstitutionIntend,omitempty"`
 }
 
 func (m EventModifyValue) String() string {
-	str := fmt.Sprintf("modify for %v:", m.ForTeam)
-	if m.Goals != nil {
-		return fmt.Sprintf("%v Goals=%v", str, *m.Goals)
-	}
-	if m.Goalie != nil {
-		return fmt.Sprintf("%v Goalie=%v", str, *m.Goalie)
-	}
-	if m.YellowCards != nil {
-		return fmt.Sprintf("%v YellowCards=%v", str, *m.YellowCards)
-	}
-	if m.YellowCardTime != nil {
-		return fmt.Sprintf("%v YellowCardTime=%v", str, *m.YellowCardTime)
-	}
-	if m.RedCards != nil {
-		return fmt.Sprintf("%v RedCards=%v", str, *m.RedCards)
-	}
-	if m.TimeoutsLeft != nil {
-		return fmt.Sprintf("%v TimeoutsLeft=%v", str, *m.TimeoutsLeft)
-	}
-	if m.TimeoutTimeLeft != nil {
-		return fmt.Sprintf("%v TimeoutTimeLeft=%v", str, *m.TimeoutTimeLeft)
-	}
-	if m.OnPositiveHalf != nil {
-		return fmt.Sprintf("%v OnPositiveHalf=%v", str, *m.OnPositiveHalf)
-	}
-	if m.TeamName != nil {
-		return fmt.Sprintf("%v TeamName=%v", str, *m.TeamName)
-	}
-	return fmt.Sprintf("%v undefined", str)
+	b, _ := json.Marshal(&m)
+	return string(b)
 }
 
 // EventTrigger is an event that can be applied
@@ -171,11 +134,12 @@ type EventStage struct {
 
 // Event holds all possible events. Only one at a time can be applied
 type Event struct {
-	Card    *EventCard        `json:"card"`
-	Command *EventCommand     `json:"command"`
-	Modify  *EventModifyValue `json:"modify"`
-	Stage   *EventStage       `json:"stage"`
-	Trigger *EventTrigger     `json:"trigger"`
+	Card      *EventCard        `json:"card"`
+	Command   *EventCommand     `json:"command"`
+	Modify    *EventModifyValue `json:"modify"`
+	Stage     *EventStage       `json:"stage"`
+	Trigger   *EventTrigger     `json:"trigger"`
+	GameEvent *GameEvent        `json:"gameEvent"`
 }
 
 func (e Event) String() string {
@@ -193,6 +157,9 @@ func (e Event) String() string {
 	}
 	if e.Trigger != nil {
 		return fmt.Sprintf("Trigger: %v", *e.Trigger)
+	}
+	if e.GameEvent != nil {
+		return fmt.Sprintf("GameEvent: %v", *e.GameEvent)
 	}
 	return "empty event"
 }

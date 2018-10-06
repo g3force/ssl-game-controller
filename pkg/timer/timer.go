@@ -1,7 +1,6 @@
 package timer
 
 import (
-	"github.com/pkg/errors"
 	"time"
 )
 
@@ -65,9 +64,9 @@ func (t *Timer) Delta() time.Duration {
 }
 
 // Start capturing the time
-func (t *Timer) Start() error {
+func (t *Timer) Start() {
 	if t.running {
-		return errors.New("timer already started")
+		return
 	}
 	t.start = t.TimeProvider()
 	t.running = true
@@ -76,40 +75,42 @@ func (t *Timer) Start() error {
 	case <-t.continueChan:
 	default:
 	}
-
-	return nil
 }
 
 // Stop capturing the time
-func (t *Timer) Stop() error {
+func (t *Timer) Stop() {
 	if !t.running {
-		return errors.New("timer is not running")
+		return
 	}
 	t.offset = t.Elapsed()
 	t.running = false
-	return nil
 }
 
 // WaitTill waits until the internal timer duration is reached.
-func (t *Timer) WaitTill(duration time.Duration) error {
+func (t *Timer) WaitTill(duration time.Duration) {
 	if !t.running {
 		select {
 		case t.continueChan <- struct{}{}:
 		case <-time.After(1 * time.Second):
-			return nil
+			return
 		}
 	}
 	sleepTime := duration - t.Elapsed()
 	if sleepTime > 0 {
 		t.SleepConsumer(sleepTime)
 	}
-	return nil
 }
 
 // WaitTillNextFullSecond waits until the internal timer has reached the next full second
-func (t *Timer) WaitTillNextFullSecond() error {
+func (t *Timer) WaitTillNextFullSecond() {
 	elapsed := t.Elapsed()
 	nextDuration := elapsed.Truncate(time.Second) + time.Second
 	t.WaitTill(nextDuration)
-	return nil
+}
+
+// WaitTillNextFull waits until the internal timer has reached the next full given duration
+func (t *Timer) WaitTillNextFull(d time.Duration) {
+	elapsed := t.Elapsed()
+	nextDuration := elapsed.Truncate(d) + d
+	t.WaitTill(nextDuration)
 }

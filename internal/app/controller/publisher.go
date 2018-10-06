@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"github.com/RoboCup-SSL/ssl-go-tools/sslproto"
+	"github.com/RoboCup-SSL/ssl-game-controller/pkg/refproto"
 	"github.com/golang/protobuf/proto"
 	"log"
 	"net"
@@ -13,7 +13,12 @@ const maxDatagramSize = 8192
 // Publisher can publish state and commands to the teams
 type Publisher struct {
 	conn    *net.UDPConn
-	message sslproto.SSL_Referee
+	message RefMessage
+}
+
+type RefMessage struct {
+	referee *refproto.Referee
+	send    func()
 }
 
 // NewPublisher creates a new publisher that publishes referee messages via UDP to the teams
@@ -28,31 +33,35 @@ func NewPublisher(address string) (publisher Publisher, err error) {
 		return
 	}
 
-	conn.SetReadBuffer(maxDatagramSize)
-	log.Println("Connected to", address)
+	if err := conn.SetWriteBuffer(maxDatagramSize); err != nil {
+		log.Printf("Could not set write buffer to %v.", maxDatagramSize)
+	}
+	log.Println("Publishing to", address)
 
 	publisher.conn = conn
+	publisher.message = RefMessage{send: publisher.send, referee: new(refproto.Referee)}
 
-	initRefereeMessage(&publisher.message)
+	initRefereeMessage(publisher.message.referee)
 
 	return
 }
 
-func initRefereeMessage(m *sslproto.SSL_Referee) {
+func initRefereeMessage(m *refproto.Referee) {
 	m.PacketTimestamp = new(uint64)
-	m.Stage = new(sslproto.SSL_Referee_Stage)
+	m.Stage = new(refproto.Referee_Stage)
 	m.StageTimeLeft = new(int32)
-	m.Command = new(sslproto.SSL_Referee_Command)
+	m.Command = new(refproto.Referee_Command)
 	m.CommandCounter = new(uint32)
 	m.CommandTimestamp = new(uint64)
-	m.Yellow = new(sslproto.SSL_Referee_TeamInfo)
+	m.Yellow = new(refproto.Referee_TeamInfo)
 	initTeamInfo(m.Yellow)
-	m.Blue = new(sslproto.SSL_Referee_TeamInfo)
+	m.Blue = new(refproto.Referee_TeamInfo)
 	initTeamInfo(m.Blue)
 	m.BlueTeamOnPositiveHalf = new(bool)
+	m.NextCommand = new(refproto.Referee_Command)
 }
 
-func initTeamInfo(t *sslproto.SSL_Referee_TeamInfo) {
+func initTeamInfo(t *refproto.Referee_TeamInfo) {
 	t.Name = new(string)
 	t.Score = new(uint32)
 	t.RedCards = new(uint32)
@@ -60,19 +69,31 @@ func initTeamInfo(t *sslproto.SSL_Referee_TeamInfo) {
 	t.Timeouts = new(uint32)
 	t.TimeoutTime = new(uint32)
 	t.Goalie = new(uint32)
+	t.FoulCounter = new(uint32)
+	t.BallPlacementFailures = new(uint32)
+	t.CanPlaceBall = new(bool)
+	t.MaxAllowedBots = new(uint32)
 }
 
 // Publish the state and command
-func (p *Publisher) Publish(state *State, command *EventCommand) {
+func (p *Publisher) Publish(state *State) {
+	p.message.Publish(state)
+}
 
+// Publish the state and command
+func (p *RefMessage) Publish(state *State) {
+	p.setState(state)
+	p.sendCommands(state)
+}
+
+func (p *Publisher) send() {
 	if p.conn == nil {
 		return
 	}
 
-	updateMessage(&p.message, state, command)
-	bytes, err := proto.Marshal(&p.message)
+	bytes, err := proto.Marshal(p.message.referee)
 	if err != nil {
-		log.Printf("Could not marshal referee message: %v\nError: %v", state, err)
+		log.Printf("Could not marshal referee message: %v\nError: %v", p.message, err)
 		return
 	}
 	_, err = p.conn.Write(bytes)
@@ -81,58 +102,113 @@ func (p *Publisher) Publish(state *State, command *EventCommand) {
 	}
 }
 
-func updateMessage(r *sslproto.SSL_Referee, state *State, command *EventCommand) {
+func (p *RefMessage) setState(state *State) (republish bool) {
+	p.referee.GameEvents = mapGameEvents(state.GameEvents)
+	p.referee.DesignatedPosition = mapLocation(state.PlacementPos)
+	p.referee.ProposedGameEvents = mapProposals(state.GameEventProposals)
 
-	*r.PacketTimestamp = uint64(time.Now().UnixNano() / 1000)
-	*r.Stage = mapStage(state.Stage)
-	*r.StageTimeLeft = int32(state.StageTimeLeft.Nanoseconds() / 1000)
-	*r.BlueTeamOnPositiveHalf = state.TeamState[TeamBlue].OnPositiveHalf
-	updateTeam(r.Yellow, state.TeamState[TeamYellow])
-	updateTeam(r.Blue, state.TeamState[TeamBlue])
+	*p.referee.PacketTimestamp = uint64(time.Now().UnixNano() / 1000)
+	*p.referee.Stage = mapStage(state.Stage)
+	*p.referee.StageTimeLeft = int32(state.StageTimeLeft.Nanoseconds() / 1000)
+	*p.referee.BlueTeamOnPositiveHalf = state.TeamState[TeamBlue].OnPositiveHalf
+	*p.referee.NextCommand = mapCommand(state.NextCommand, state.NextCommandFor)
 
-	if command != nil {
-		*r.Command = mapCommand(command)
-		*r.CommandCounter++
-		*r.CommandTimestamp = uint64(time.Now().UnixNano() / 1000)
-	}
+	updateTeam(p.referee.Yellow, state.TeamState[TeamYellow])
+	updateTeam(p.referee.Blue, state.TeamState[TeamBlue])
+	return
 }
 
-func mapCommand(c *EventCommand) sslproto.SSL_Referee_Command {
-	switch c.Type {
+func mapProposals(proposals []*GameEventProposal) []*refproto.ProposedGameEvent {
+	mappedProposals := make([]*refproto.ProposedGameEvent, len(proposals))
+	for i, proposal := range proposals {
+		mappedProposals[i] = new(refproto.ProposedGameEvent)
+		mappedProposals[i].ProposerId = &proposal.ProposerId
+		mappedProposals[i].ValidUntil = new(uint64)
+		*mappedProposals[i].ValidUntil = uint64(proposal.ValidUntil.UnixNano() / 1000)
+		mappedProposals[i].GameEvent = proposal.GameEvent.ToProto()
+	}
+	return mappedProposals
+}
+
+func (p *RefMessage) sendCommands(state *State) {
+	newCommand := mapCommand(state.Command, state.CommandFor)
+
+	// send the GOAL command based on the team score for compatibility with old behavior
+	if state.TeamState[TeamYellow].Goals > int(*p.referee.Yellow.Score) {
+		p.updateCommand(refproto.Referee_GOAL_YELLOW)
+		p.send()
+		p.updateCommand(newCommand)
+	} else if state.TeamState[TeamBlue].Goals > int(*p.referee.Blue.Score) {
+		p.updateCommand(refproto.Referee_GOAL_BLUE)
+		p.send()
+		p.updateCommand(newCommand)
+	} else if *p.referee.Command != newCommand {
+		switch state.Command {
+		case CommandBallPlacement,
+			CommandDirect,
+			CommandIndirect,
+			CommandKickoff,
+			CommandPenalty:
+			if *p.referee.Command != refproto.Referee_STOP {
+				// send a STOP right before the actual command to be compatible with old behavior
+				p.updateCommand(refproto.Referee_STOP)
+				p.send()
+			}
+		}
+		p.updateCommand(newCommand)
+	}
+
+	p.send()
+}
+
+func (p *RefMessage) updateCommand(newCommand refproto.Referee_Command) {
+	*p.referee.Command = newCommand
+	*p.referee.CommandCounter++
+	*p.referee.CommandTimestamp = uint64(time.Now().UnixNano() / 1000)
+}
+
+func mapGameEvents(events []*GameEvent) []*refproto.GameEvent {
+	mappedEvents := make([]*refproto.GameEvent, len(events))
+	for i, e := range events {
+		mappedEvents[i] = e.ToProto()
+	}
+	return mappedEvents
+}
+
+func mapCommand(command RefCommand, team Team) refproto.Referee_Command {
+	switch command {
 	case CommandHalt:
-		return sslproto.SSL_Referee_HALT
+		return refproto.Referee_HALT
 	case CommandStop:
-		return sslproto.SSL_Referee_STOP
+		return refproto.Referee_STOP
 	case CommandNormalStart:
-		return sslproto.SSL_Referee_NORMAL_START
+		return refproto.Referee_NORMAL_START
 	case CommandForceStart:
-		return sslproto.SSL_Referee_FORCE_START
+		return refproto.Referee_FORCE_START
 	case CommandDirect:
-		return commandByTeam(c, sslproto.SSL_Referee_DIRECT_FREE_BLUE, sslproto.SSL_Referee_DIRECT_FREE_YELLOW)
+		return commandByTeam(team, refproto.Referee_DIRECT_FREE_BLUE, refproto.Referee_DIRECT_FREE_YELLOW)
 	case CommandIndirect:
-		return commandByTeam(c, sslproto.SSL_Referee_INDIRECT_FREE_BLUE, sslproto.SSL_Referee_INDIRECT_FREE_YELLOW)
+		return commandByTeam(team, refproto.Referee_INDIRECT_FREE_BLUE, refproto.Referee_INDIRECT_FREE_YELLOW)
 	case CommandKickoff:
-		return commandByTeam(c, sslproto.SSL_Referee_PREPARE_KICKOFF_BLUE, sslproto.SSL_Referee_PREPARE_KICKOFF_YELLOW)
+		return commandByTeam(team, refproto.Referee_PREPARE_KICKOFF_BLUE, refproto.Referee_PREPARE_KICKOFF_YELLOW)
 	case CommandPenalty:
-		return commandByTeam(c, sslproto.SSL_Referee_PREPARE_PENALTY_BLUE, sslproto.SSL_Referee_PREPARE_PENALTY_YELLOW)
+		return commandByTeam(team, refproto.Referee_PREPARE_PENALTY_BLUE, refproto.Referee_PREPARE_PENALTY_YELLOW)
 	case CommandTimeout:
-		return commandByTeam(c, sslproto.SSL_Referee_TIMEOUT_BLUE, sslproto.SSL_Referee_TIMEOUT_YELLOW)
+		return commandByTeam(team, refproto.Referee_TIMEOUT_BLUE, refproto.Referee_TIMEOUT_YELLOW)
 	case CommandBallPlacement:
-		return commandByTeam(c, sslproto.SSL_Referee_BALL_PLACEMENT_BLUE, sslproto.SSL_Referee_BALL_PLACEMENT_YELLOW)
-	case CommandGoal:
-		return commandByTeam(c, sslproto.SSL_Referee_GOAL_BLUE, sslproto.SSL_Referee_GOAL_YELLOW)
+		return commandByTeam(team, refproto.Referee_BALL_PLACEMENT_BLUE, refproto.Referee_BALL_PLACEMENT_YELLOW)
 	}
 	return -1
 }
 
-func commandByTeam(command *EventCommand, blueCommand sslproto.SSL_Referee_Command, yellowCommand sslproto.SSL_Referee_Command) sslproto.SSL_Referee_Command {
-	if *command.ForTeam == TeamBlue {
+func commandByTeam(team Team, blueCommand refproto.Referee_Command, yellowCommand refproto.Referee_Command) refproto.Referee_Command {
+	if team == TeamBlue {
 		return blueCommand
 	}
 	return yellowCommand
 }
 
-func updateTeam(team *sslproto.SSL_Referee_TeamInfo, state *TeamInfo) {
+func updateTeam(team *refproto.Referee_TeamInfo, state *TeamInfo) {
 	*team.Name = state.Name
 	*team.Score = uint32(state.Goals)
 	*team.RedCards = uint32(state.RedCards)
@@ -141,6 +217,10 @@ func updateTeam(team *sslproto.SSL_Referee_TeamInfo, state *TeamInfo) {
 	*team.Timeouts = uint32(state.TimeoutsLeft)
 	*team.TimeoutTime = uint32(state.TimeoutTimeLeft.Nanoseconds() / 1000)
 	*team.Goalie = uint32(state.Goalie)
+	*team.FoulCounter = uint32(state.FoulCounter)
+	*team.BallPlacementFailures = uint32(state.BallPlacementFailures)
+	*team.CanPlaceBall = state.CanPlaceBall
+	*team.MaxAllowedBots = uint32(state.MaxAllowedBots)
 }
 
 func mapTimes(durations []time.Duration) []uint32 {
@@ -151,36 +231,45 @@ func mapTimes(durations []time.Duration) []uint32 {
 	return times
 }
 
-func mapStage(stage Stage) sslproto.SSL_Referee_Stage {
+func mapStage(stage Stage) refproto.Referee_Stage {
 	switch stage {
 	case StagePreGame:
-		return sslproto.SSL_Referee_NORMAL_FIRST_HALF_PRE
+		return refproto.Referee_NORMAL_FIRST_HALF_PRE
 	case StageFirstHalf:
-		return sslproto.SSL_Referee_NORMAL_FIRST_HALF
+		return refproto.Referee_NORMAL_FIRST_HALF
 	case StageHalfTime:
-		return sslproto.SSL_Referee_NORMAL_HALF_TIME
+		return refproto.Referee_NORMAL_HALF_TIME
 	case StageSecondHalfPre:
-		return sslproto.SSL_Referee_NORMAL_SECOND_HALF_PRE
+		return refproto.Referee_NORMAL_SECOND_HALF_PRE
 	case StageSecondHalf:
-		return sslproto.SSL_Referee_NORMAL_SECOND_HALF
+		return refproto.Referee_NORMAL_SECOND_HALF
 	case StageOvertimeBreak:
-		return sslproto.SSL_Referee_EXTRA_TIME_BREAK
+		return refproto.Referee_EXTRA_TIME_BREAK
 	case StageOvertimeFirstHalfPre:
-		return sslproto.SSL_Referee_EXTRA_FIRST_HALF_PRE
+		return refproto.Referee_EXTRA_FIRST_HALF_PRE
 	case StageOvertimeFirstHalf:
-		return sslproto.SSL_Referee_EXTRA_FIRST_HALF
+		return refproto.Referee_EXTRA_FIRST_HALF
 	case StageOvertimeHalfTime:
-		return sslproto.SSL_Referee_EXTRA_HALF_TIME
+		return refproto.Referee_EXTRA_HALF_TIME
 	case StageOvertimeSecondHalfPre:
-		return sslproto.SSL_Referee_EXTRA_SECOND_HALF_PRE
+		return refproto.Referee_EXTRA_SECOND_HALF_PRE
 	case StageOvertimeSecondHalf:
-		return sslproto.SSL_Referee_EXTRA_SECOND_HALF
+		return refproto.Referee_EXTRA_SECOND_HALF
 	case StageShootoutBreak:
-		return sslproto.SSL_Referee_PENALTY_SHOOTOUT_BREAK
+		return refproto.Referee_PENALTY_SHOOTOUT_BREAK
 	case StageShootout:
-		return sslproto.SSL_Referee_PENALTY_SHOOTOUT
+		return refproto.Referee_PENALTY_SHOOTOUT
 	case StagePostGame:
-		return sslproto.SSL_Referee_POST_GAME
+		return refproto.Referee_POST_GAME
 	}
 	return -1
+}
+
+func mapLocation(location *Location) *refproto.Referee_Point {
+	if location == nil {
+		return nil
+	}
+	x := float32(location.X)
+	y := float32(location.Y)
+	return &refproto.Referee_Point{X: &x, Y: &y}
 }

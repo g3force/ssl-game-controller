@@ -5,43 +5,42 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RoboCup-SSL/ssl-go-tools/sslproto"
+	"github.com/RoboCup-SSL/ssl-game-controller/pkg/refproto"
 )
 
 func Test_updateMessage(t *testing.T) {
-	proto := sslproto.SSL_Referee{}
-	initRefereeMessage(&proto)
 	state := NewState()
-	team := TeamYellow
-	command := EventCommand{ForTeam: &team, Type: CommandDirect}
 
-	updateMessage(&proto, state, &command)
+	r := &RefMessage{send: func() {}, referee: new(refproto.Referee)}
+	referee := r.referee
+	initRefereeMessage(referee)
+	r.Publish(state)
 
-	if *proto.PacketTimestamp <= 0 {
-		t.Errorf("Wrong packet timestamp: %v", *proto.PacketTimestamp)
+	if *referee.PacketTimestamp <= 0 {
+		t.Errorf("Wrong packet timestamp: %v", *referee.PacketTimestamp)
 	}
-	if *proto.Stage != sslproto.SSL_Referee_NORMAL_FIRST_HALF_PRE {
-		t.Errorf("Wrong Stage: %v", *proto.Stage)
+	if *referee.Stage != refproto.Referee_NORMAL_FIRST_HALF_PRE {
+		t.Errorf("Wrong Stage: %v", *referee.Stage)
 	}
-	if *proto.StageTimeLeft != 0 {
-		t.Errorf("Wrong StageTimeLeft: %v", *proto.StageTimeLeft)
+	if *referee.StageTimeLeft != 0 {
+		t.Errorf("Wrong StageTimeLeft: %v", *referee.StageTimeLeft)
 	}
-	if *proto.Command != sslproto.SSL_Referee_DIRECT_FREE_YELLOW {
-		t.Errorf("Wrong command: %v", *proto.Command)
+	if *referee.Command != refproto.Referee_HALT {
+		t.Errorf("Wrong command: %v", *referee.Command)
 	}
-	if *proto.CommandCounter != 1 {
-		t.Errorf("Wrong CommandCounter: %v", *proto.CommandCounter)
+	if *referee.CommandCounter == 1 {
+		t.Errorf("Wrong CommandCounter: %v", *referee.CommandCounter)
 	}
-	if *proto.CommandTimestamp <= 0 {
-		t.Errorf("Wrong CommandTimestamp: %v", *proto.CommandTimestamp)
+	if *referee.CommandTimestamp != 0 {
+		t.Errorf("Wrong CommandTimestamp: %v", *referee.CommandTimestamp)
 	}
-	if *proto.BlueTeamOnPositiveHalf != false {
-		t.Errorf("Wrong half: %v", *proto.BlueTeamOnPositiveHalf)
+	if *referee.BlueTeamOnPositiveHalf {
+		t.Errorf("Wrong half: %v", *referee.BlueTeamOnPositiveHalf)
 	}
-	if proto.Yellow == nil {
+	if referee.Yellow == nil {
 		t.Errorf("Missing Yellow")
 	}
-	if proto.Blue == nil {
+	if referee.Blue == nil {
 		t.Errorf("Missing Blue")
 	}
 }

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"github.com/RoboCup-SSL/ssl-game-controller/pkg/refproto"
 	"github.com/pkg/errors"
 	"time"
 )
@@ -14,6 +15,10 @@ const (
 	TeamYellow Team = "Yellow"
 	// TeamBlue is the blue team
 	TeamBlue Team = "Blue"
+	// TeamUnknown is an unknown team
+	TeamUnknown Team = ""
+	// TeamBoth are both teams
+	TeamBoth = "Both"
 )
 
 // Opposite returns the other team
@@ -31,6 +36,39 @@ func (t Team) Opposite() Team {
 func (t Team) Unknown() bool {
 	return t != "Yellow" && t != "Blue"
 }
+
+// Known returns true if the team is blue or yellow
+func (t Team) Known() bool {
+	return !t.Unknown()
+}
+
+func (t Team) toProto() refproto.Team {
+	if t == TeamYellow {
+		return refproto.Team_YELLOW
+	} else if t == TeamBlue {
+		return refproto.Team_BLUE
+	} else if t == TeamBoth {
+		return refproto.Team_BOTH
+	}
+	return refproto.Team_UNKNOWN
+}
+
+// NewTeam creates a team from a protobuf team
+func NewTeam(team refproto.Team) Team {
+	if team == refproto.Team_YELLOW {
+		return TeamYellow
+	} else if team == refproto.Team_BLUE {
+		return TeamBlue
+	}
+	return TeamUnknown
+}
+
+type Division string
+
+const (
+	DivA Division = "DivA"
+	DivB Division = "DivB"
+)
 
 // Stage represents the different stages of a game
 type Stage string
@@ -125,6 +163,56 @@ func (s Stage) IsPreStage() bool {
 	return false
 }
 
+func (s Stage) IsPausedStage() bool {
+	switch s {
+	case StageHalfTime, StageOvertimeBreak, StageOvertimeHalfTime, StageShootoutBreak:
+		return true
+	}
+	return false
+}
+
+// RefCommand is a command to be send to the teams
+type RefCommand string
+
+const (
+	// CommandUnknown not set
+	CommandUnknown RefCommand = ""
+	// CommandHalt HALT
+	CommandHalt RefCommand = "halt"
+	// CommandStop STOP
+	CommandStop RefCommand = "stop"
+	// CommandNormalStart NORMAL_START
+	CommandNormalStart RefCommand = "normalStart"
+	// CommandForceStart FORCE_START
+	CommandForceStart RefCommand = "forceStart"
+	// CommandDirect DIRECT
+	CommandDirect RefCommand = "direct"
+	// CommandIndirect INDIRECT
+	CommandIndirect RefCommand = "indirect"
+	// CommandKickoff KICKOFF
+	CommandKickoff RefCommand = "kickoff"
+	// CommandPenalty PENALTY
+	CommandPenalty RefCommand = "penalty"
+	// CommandTimeout TIMEOUT
+	CommandTimeout RefCommand = "timeout"
+	// CommandBallPlacement BALL_PLACEMENT
+	CommandBallPlacement RefCommand = "ballPlacement"
+)
+
+func (c RefCommand) ContinuesGame() bool {
+	switch c {
+	case CommandNormalStart,
+		CommandForceStart,
+		CommandDirect,
+		CommandIndirect,
+		CommandPenalty,
+		CommandKickoff:
+		return true
+	default:
+		return false
+	}
+}
+
 // GameState of a game
 type GameState string
 
@@ -147,38 +235,70 @@ const (
 
 // TeamInfo about a team
 type TeamInfo struct {
-	Name            string          `json:"name"`
-	Goals           int             `json:"goals"`
-	Goalie          int             `json:"goalie"`
-	YellowCards     int             `json:"yellowCards"`
-	YellowCardTimes []time.Duration `json:"yellowCardTimes"`
-	RedCards        int             `json:"redCards"`
-	TimeoutsLeft    int             `json:"timeoutsLeft"`
-	TimeoutTimeLeft time.Duration   `json:"timeoutTimeLeft"`
-	OnPositiveHalf  bool            `json:"onPositiveHalf"`
+	Name                  string          `json:"name"`
+	Goals                 int             `json:"goals"`
+	Goalie                int             `json:"goalie"`
+	YellowCards           int             `json:"yellowCards"`
+	YellowCardTimes       []time.Duration `json:"yellowCardTimes"`
+	RedCards              int             `json:"redCards"`
+	TimeoutsLeft          int             `json:"timeoutsLeft"`
+	TimeoutTimeLeft       time.Duration   `json:"timeoutTimeLeft"`
+	OnPositiveHalf        bool            `json:"onPositiveHalf"`
+	FoulCounter           int             `json:"foulCounter"`
+	BallPlacementFailures int             `json:"ballPlacementFailures"`
+	CanPlaceBall          bool            `json:"canPlaceBall"`
+	MaxAllowedBots        int             `json:"maxAllowedBots"`
+	Connected             bool            `json:"connected"`
+	BotSubstitutionIntend bool            `json:"botSubstitutionIntend"`
+}
+
+type GameEventBehavior string
+
+const (
+	GameEventBehaviorOn       GameEventBehavior = "on"
+	GameEventBehaviorMajority GameEventBehavior = "majority"
+	GameEventBehaviorOff      GameEventBehavior = "off"
+)
+
+// GameEventProposal holds a proposal for a game event from an autoRef
+type GameEventProposal struct {
+	ProposerId string    `json:"proposerId"`
+	GameEvent  GameEvent `json:"gameEvent"`
+	ValidUntil time.Time `json:"validUntil"`
 }
 
 // State of the game
 type State struct {
-	Stage            Stage              `json:"stage"`
-	GameState        GameState          `json:"gameState"`
-	GameStateFor     *Team              `json:"gameStateForTeam"`
-	StageTimeElapsed time.Duration      `json:"gameTimeElapsed"`
-	StageTimeLeft    time.Duration      `json:"gameTimeLeft"`
-	MatchDuration    time.Duration      `json:"matchDuration"`
-	TeamState        map[Team]*TeamInfo `json:"teamState"`
+	Stage              Stage                               `json:"stage"`
+	Command            RefCommand                          `json:"command"`
+	CommandFor         Team                                `json:"commandForTeam"`
+	GameEvents         []*GameEvent                        `json:"gameEvents"`
+	StageTimeElapsed   time.Duration                       `json:"stageTimeElapsed"`
+	StageTimeLeft      time.Duration                       `json:"stageTimeLeft"`
+	MatchTimeStart     time.Time                           `json:"matchTimeStart"`
+	MatchDuration      time.Duration                       `json:"matchDuration"`
+	TeamState          map[Team]*TeamInfo                  `json:"teamState"`
+	Division           Division                            `json:"division"`
+	PlacementPos       *Location                           `json:"placementPos"`
+	AutoContinue       bool                                `json:"autoContinue"`
+	NextCommand        RefCommand                          `json:"nextCommand"`
+	NextCommandFor     Team                                `json:"nextCommandFor"`
+	AutoRefsConnected  []string                            `json:"autoRefsConnected"`
+	GameEventBehavior  map[GameEventType]GameEventBehavior `json:"gameEventBehavior"`
+	GameEventProposals []*GameEventProposal                `json:"gameEventProposals"`
 }
 
 // NewState creates a new state, initialized for the start of a new game
 func NewState() (s *State) {
 	s = new(State)
 	s.Stage = StagePreGame
-	s.GameState = GameStateHalted
+	s.Command = CommandHalt
+	s.GameEvents = []*GameEvent{}
 
-	// for some reason, the UI does not reset times correctly if duration is zero, so set it to 1ns
-	s.StageTimeLeft = 1
-	s.StageTimeElapsed = 1
-	s.MatchDuration = 1
+	s.StageTimeLeft = 0
+	s.StageTimeElapsed = 0
+	s.MatchDuration = 0
+	s.MatchTimeStart = time.Unix(0, 0)
 
 	s.TeamState = map[Team]*TeamInfo{}
 	s.TeamState[TeamYellow] = new(TeamInfo)
@@ -187,7 +307,48 @@ func NewState() (s *State) {
 	*s.TeamState[TeamBlue] = newTeamInfo()
 	s.TeamState[TeamBlue].OnPositiveHalf = !s.TeamState[TeamYellow].OnPositiveHalf
 
+	s.Division = DivA
+	s.AutoContinue = true
+
+	s.GameEventBehavior = map[GameEventType]GameEventBehavior{}
+	for _, event := range AllGameEvents() {
+		s.GameEventBehavior[event] = GameEventBehaviorOn
+	}
+
 	return
+}
+
+func (s State) GameState() GameState {
+	switch s.Command {
+	case CommandHalt:
+		return GameStateHalted
+	case CommandStop:
+		return GameStateStopped
+	case CommandNormalStart, CommandForceStart, CommandDirect, CommandIndirect:
+		return GameStateRunning
+	case CommandKickoff:
+		return GameStatePreKickoff
+	case CommandPenalty:
+		return GameStatePrePenalty
+	case CommandTimeout:
+		return GameStateTimeout
+	case CommandBallPlacement:
+		return GameStateBallPlacement
+	}
+	return ""
+}
+
+func (s State) BotSubstitutionIntend() Team {
+	if s.TeamState[TeamYellow].BotSubstitutionIntend && s.TeamState[TeamBlue].BotSubstitutionIntend {
+		return TeamBoth
+	}
+	if s.TeamState[TeamYellow].BotSubstitutionIntend {
+		return TeamYellow
+	}
+	if s.TeamState[TeamBlue].BotSubstitutionIntend {
+		return TeamBlue
+	}
+	return TeamUnknown
 }
 
 func newTeamInfo() (t TeamInfo) {
@@ -200,6 +361,10 @@ func newTeamInfo() (t TeamInfo) {
 	t.TimeoutsLeft = 0
 	t.TimeoutTimeLeft = 0
 	t.OnPositiveHalf = true
+	t.FoulCounter = 0
+	t.BallPlacementFailures = 0
+	t.CanPlaceBall = true
+	t.MaxAllowedBots = 0
 	return
 }
 
@@ -217,4 +382,29 @@ func (s State) String() string {
 		return e.Error()
 	}
 	return string(bytes)
+}
+
+func (s *State) TeamByName(teamName string) Team {
+	if s.TeamState[TeamBlue].Name == teamName {
+		return TeamBlue
+	}
+	if s.TeamState[TeamYellow].Name == teamName {
+		return TeamYellow
+	}
+	return ""
+}
+
+// Location is a two-dimensional coordinate
+type Location struct {
+	X float64
+	Y float64
+}
+
+func (l Location) toProto() (p *refproto.Location) {
+	p = new(refproto.Location)
+	p.X = new(float32)
+	p.Y = new(float32)
+	*p.X = float32(l.X)
+	*p.Y = float32(l.Y)
+	return
 }
